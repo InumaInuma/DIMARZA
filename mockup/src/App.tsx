@@ -1,7 +1,9 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import AppLayout from './layout/AppLayout.tsx'
 import AccessMatrixPage from './pages/AccessMatrixPage.tsx'
+import DashboardPage from './pages/DashboardPage.tsx'
 import LoginPage from './pages/LoginPage.tsx'
+import MappingPage from './pages/MappingPage.tsx'
 import { useMillStore } from './store/useMillStore.ts'
 
 export default function App() {
@@ -19,29 +21,8 @@ export default function App() {
         <Route
           element={currentUser ? <AppLayout /> : <Navigate to="/login" replace />}
         >
-          <Route
-            path="/"
-            element={
-              <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-xs">
-                <h1 className="text-xl font-bold text-slate-900">Inicio (KPIs)</h1>
-                <p className="mt-1 text-sm text-slate-500">
-                  Resumen general del molino {activeMill?.code ?? activeMillCode} ·{' '}
-                  {activeMill?.pieces.length ?? 280} piezas registradas.
-                </p>
-              </div>
-            }
-          />
-          <Route
-            path="/mapeo"
-            element={
-              <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-xs">
-                <h1 className="text-xl font-bold text-slate-900">Mapeo 2D</h1>
-                <p className="mt-1 text-sm text-slate-500">
-                  Grilla desplegada del Shell y vista frontal de tapas para {activeMill?.code ?? activeMillCode}.
-                </p>
-              </div>
-            }
-          />
+          <Route path="/" element={<DashboardPage />} />
+          <Route path="/mapeo" element={<MappingPage />} />
           <Route
             path="/vista-3d"
             element={
