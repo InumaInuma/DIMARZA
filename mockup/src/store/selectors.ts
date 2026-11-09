@@ -1,5 +1,5 @@
 import { DISCHARGE_RINGS, FEED_RINGS, SHELL_RINGS } from '../domain/seed.ts'
-import type { Mill, Piece, PieceState, Section, ShiftPlanPoint } from '../domain/types.ts'
+import type { Milestone, Mill, Piece, PieceState, Section, ShiftPlanPoint } from '../domain/types.ts'
 import type { MillStoreState } from './useMillStore.ts'
 
 export type PieceFilter = 'ALL' | 'P' | 'R' | 'RC' | 'PENDING'
@@ -227,6 +227,444 @@ export function selectMillKpiMetrics(state: MillStoreState): MillKpiMetrics {
   cachedMillCodeRef = state.activeMillCode
   cachedShiftPlanRef = state.shiftPlan
   cachedMetricsResult = result
+
+  return result
+}
+
+export interface PiecesSCurveData {
+  categories: string[]
+  plannedSeries: (number | null)[]
+  removedSeries: (number | null)[]
+  changedSeries: (number | null)[]
+  totalPieces: number
+  currentChanged: number
+  currentRemovedTotal: number
+  expectedPieces: number
+}
+
+export interface ShutdownSCurveData {
+  categories: string[]
+  plannedPercentSeries: number[]
+  realPercentSeries: (number | null)[]
+  realAccumulatedPercent: number
+  plannedAccumulatedPercent: number
+  deviationPercent: number
+  spi: number
+  isBehind: boolean
+  reportedShiftsCount: number
+  totalShiftsCount: number
+  totalPlannedHours: number
+  totalEarnedHours: number
+}
+
+export interface MilestoneWithDuration extends Milestone {
+  durationHours: number
+}
+
+export interface MilestoneGroup {
+  summary: MilestoneWithDuration
+  children: MilestoneWithDuration[]
+}
+
+export interface GanttActivityItem {
+  id: string
+  parentId?: string
+  name: string
+  start: string
+  end: string
+  startHour: number
+  endHour: number
+  durationHours: number
+  progress: number
+  isSummary: boolean
+}
+
+export interface GanttChartData {
+  baseTimestamp: number
+  totalHours: number
+  currentHour: number
+  currentShiftLabel: string
+  items: GanttActivityItem[]
+}
+
+function parseTimestampMs(isoLocal: string): number {
+  const parsed = Date.parse(isoLocal)
+  return Number.isNaN(parsed) ? Date.now() : parsed
+}
+
+export function calculateDurationHours(start: string, end: string): number {
+  const diffMs = parseTimestampMs(end) - parseTimestampMs(start)
+  const rawHours = diffMs / (1000 * 3600)
+  return Math.max(0.5, Math.round(rawHours * 10) / 10)
+}
+
+let cachedPiecesCurveMillRef: Mill | undefined
+let cachedPiecesCurveShiftRef: ShiftPlanPoint[] | undefined
+let cachedPiecesCurveResult: PiecesSCurveData | undefined
+
+export function selectPiecesSCurveData(state: MillStoreState): PiecesSCurveData {
+  const activeMill = state.mills[state.activeMillCode] ?? Object.values(state.mills)[0]
+
+  if (
+    cachedPiecesCurveResult &&
+    cachedPiecesCurveMillRef === activeMill &&
+    cachedPiecesCurveShiftRef === state.shiftPlan
+  ) {
+    return cachedPiecesCurveResult
+  }
+
+  const metrics = selectMillKpiMetrics(state)
+  const currentChanged = metrics.changedCount
+  const currentRemovedTotal = metrics.removedCount + metrics.changedCount
+  const baseRatio = metrics.totalPieces > 0 ? currentChanged / 84 : 0
+
+  const categories: string[] = []
+  const plannedSeries: (number | null)[] = []
+  const removedSeries: (number | null)[] = []
+  const changedSeries: (number | null)[] = []
+
+  let lastReportedIdx = 0
+  for (let i = 0; i < state.shiftPlan.length; i += 1) {
+    if (state.shiftPlan[i].changedCumulative !== undefined) {
+      lastReportedIdx = i
+    }
+  }
+
+  for (let i = 0; i < state.shiftPlan.length; i += 1) {
+    const point = state.shiftPlan[i]
+    categories.push(point.shift)
+    plannedSeries.push(point.plannedCumulative)
+
+    if (i < lastReportedIdx && point.changedCumulative !== undefined) {
+      const scaledChanged = Math.min(
+        currentChanged,
+        Math.round(point.changedCumulative * Math.min(1, baseRatio)),
+      )
+      const rawRemoved = point.removedCumulative ?? point.changedCumulative
+      const scaledRemoved = Math.min(
+        currentRemovedTotal,
+        Math.max(scaledChanged, Math.round(rawRemoved * Math.min(1, baseRatio))),
+      )
+      changedSeries.push(scaledChanged)
+      removedSeries.push(scaledRemoved)
+    } else if (i === lastReportedIdx) {
+      changedSeries.push(currentChanged)
+      removedSeries.push(currentRemovedTotal)
+    } else {
+      changedSeries.push(null)
+      removedSeries.push(null)
+    }
+  }
+
+  categories.push('Actual')
+  plannedSeries.push(metrics.expectedPieces)
+  changedSeries.push(currentChanged)
+  removedSeries.push(currentRemovedTotal)
+
+  const result: PiecesSCurveData = {
+    categories,
+    plannedSeries,
+    removedSeries,
+    changedSeries,
+    totalPieces: metrics.totalPieces,
+    currentChanged,
+    currentRemovedTotal,
+    expectedPieces: metrics.expectedPieces,
+  }
+
+  cachedPiecesCurveMillRef = activeMill
+  cachedPiecesCurveShiftRef = state.shiftPlan
+  cachedPiecesCurveResult = result
+
+  return result
+}
+
+function resolveBaseShutdownMs(milestones: Milestone[]): number {
+  if (milestones.length === 0) {
+    const now = new Date()
+    return new Date(now.getFullYear(), now.getMonth(), now.getDate(), 7, 0, 0, 0).getTime()
+  }
+  let minMs = Number.POSITIVE_INFINITY
+  for (const ms of milestones) {
+    const startMs = parseTimestampMs(ms.start)
+    if (startMs < minMs) {
+      minMs = startMs
+    }
+  }
+  return Number.isFinite(minMs) ? minMs : Date.now()
+}
+
+function getLeafActivities(milestones: Milestone[]): MilestoneWithDuration[] {
+  const parentIds = new Set<string>()
+  for (const item of milestones) {
+    if (item.parentId) {
+      parentIds.add(item.parentId)
+    }
+  }
+
+  return milestones
+    .filter((item) => item.parentId !== undefined || !parentIds.has(item.id))
+    .map((item) => ({
+      ...item,
+      durationHours: calculateDurationHours(item.start, item.end),
+    }))
+}
+
+let cachedShutdownMilestonesRef: Milestone[] | undefined
+let cachedShutdownShiftPlanRef: ShiftPlanPoint[] | undefined
+let cachedShutdownCurveResult: ShutdownSCurveData | undefined
+
+export function selectShutdownSCurveData(state: MillStoreState): ShutdownSCurveData {
+  if (
+    cachedShutdownCurveResult &&
+    cachedShutdownMilestonesRef === state.milestones &&
+    cachedShutdownShiftPlanRef === state.shiftPlan
+  ) {
+    return cachedShutdownCurveResult
+  }
+
+  const baseMs = resolveBaseShutdownMs(state.milestones)
+  const leafActivities = getLeafActivities(state.milestones)
+
+  const totalPlannedHours = Math.max(
+    1,
+    leafActivities.reduce((acc, item) => acc + item.durationHours, 0),
+  )
+
+  const totalEarnedHours = leafActivities.reduce(
+    (acc, item) => acc + item.durationHours * (item.progress / 100),
+    0,
+  )
+
+  let latestReportedIdx = 0
+  let reportedShiftsCount = 0
+  for (let i = 0; i < state.shiftPlan.length; i += 1) {
+    if (state.shiftPlan[i].changedCumulative !== undefined) {
+      latestReportedIdx = i
+      if (state.shiftPlan[i].hoursElapsed > 0) {
+        reportedShiftsCount += 1
+      }
+    }
+  }
+
+  const evaluationShiftIdx = Math.min(state.shiftPlan.length - 1, latestReportedIdx + 1)
+  const categories: string[] = []
+  const plannedPercentSeries: number[] = []
+  const realPercentSeries: (number | null)[] = []
+
+  for (let i = 0; i < state.shiftPlan.length; i += 1) {
+    const point = state.shiftPlan[i]
+    categories.push(point.shift)
+
+    const cutoffHour = point.hoursElapsed
+    let plannedHoursByCutoff = 0
+    let earnedHoursByCutoff = 0
+
+    for (const act of leafActivities) {
+      const startHour = Math.max(0, (parseTimestampMs(act.start) - baseMs) / (1000 * 3600))
+      const overlap = Math.min(act.durationHours, Math.max(0, cutoffHour - startHour))
+      plannedHoursByCutoff += overlap
+
+      const actEarnedHours = act.durationHours * (act.progress / 100)
+      if (i < evaluationShiftIdx) {
+        earnedHoursByCutoff += Math.min(actEarnedHours, overlap)
+      } else {
+        earnedHoursByCutoff += actEarnedHours
+      }
+    }
+
+    const plannedPct =
+      i === state.shiftPlan.length - 1
+        ? 100
+        : Math.min(100, Math.round((plannedHoursByCutoff / totalPlannedHours) * 1000) / 10)
+    plannedPercentSeries.push(plannedPct)
+
+    if (i === 0) {
+      realPercentSeries.push(0)
+    } else if (i <= evaluationShiftIdx) {
+      const realPct = Math.min(
+        100,
+        Math.round((earnedHoursByCutoff / totalPlannedHours) * 1000) / 10,
+      )
+      realPercentSeries.push(realPct)
+    } else {
+      realPercentSeries.push(null)
+    }
+  }
+
+  const realAccumulatedPercent = Math.min(
+    100,
+    Math.round((totalEarnedHours / totalPlannedHours) * 1000) / 10,
+  )
+  const plannedAccumulatedPercent =
+    plannedPercentSeries[evaluationShiftIdx] ??
+    plannedPercentSeries[latestReportedIdx] ??
+    33.3
+
+  const deviationPercent =
+    Math.round((realAccumulatedPercent - plannedAccumulatedPercent) * 10) / 10
+
+  const spi =
+    plannedAccumulatedPercent > 0
+      ? Math.round((realAccumulatedPercent / plannedAccumulatedPercent) * 100) / 100
+      : 1
+
+  const totalShiftsCount = Math.max(1, state.shiftPlan.filter((p) => p.hoursElapsed > 0).length)
+
+  const result: ShutdownSCurveData = {
+    categories,
+    plannedPercentSeries,
+    realPercentSeries,
+    realAccumulatedPercent,
+    plannedAccumulatedPercent,
+    deviationPercent,
+    spi,
+    isBehind: spi < 1,
+    reportedShiftsCount,
+    totalShiftsCount,
+    totalPlannedHours: Math.round(totalPlannedHours * 10) / 10,
+    totalEarnedHours: Math.round(totalEarnedHours * 10) / 10,
+  }
+
+  cachedShutdownMilestonesRef = state.milestones
+  cachedShutdownShiftPlanRef = state.shiftPlan
+  cachedShutdownCurveResult = result
+
+  return result
+}
+
+let cachedGroupMilestonesRef: Milestone[] | undefined
+let cachedMilestoneGroupsResult: MilestoneGroup[] | undefined
+
+export function selectMilestoneGroups(state: MillStoreState): MilestoneGroup[] {
+  if (cachedMilestoneGroupsResult && cachedGroupMilestonesRef === state.milestones) {
+    return cachedMilestoneGroupsResult
+  }
+
+  const summaries = state.milestones.filter((m) => !m.parentId)
+  const childrenByParent = new Map<string, MilestoneWithDuration[]>()
+
+  for (const item of state.milestones) {
+    if (item.parentId) {
+      const list = childrenByParent.get(item.parentId) ?? []
+      list.push({
+        ...item,
+        durationHours: calculateDurationHours(item.start, item.end),
+      })
+      childrenByParent.set(item.parentId, list)
+    }
+  }
+
+  const groups: MilestoneGroup[] = summaries.map((summary) => {
+    const children = childrenByParent.get(summary.id) ?? []
+    return {
+      summary: {
+        ...summary,
+        durationHours: calculateDurationHours(summary.start, summary.end),
+      },
+      children,
+    }
+  })
+
+  cachedGroupMilestonesRef = state.milestones
+  cachedMilestoneGroupsResult = groups
+
+  return groups
+}
+
+let cachedGanttMilestonesRef: Milestone[] | undefined
+let cachedGanttShiftPlanRef: ShiftPlanPoint[] | undefined
+let cachedGanttResult: GanttChartData | undefined
+
+export function selectGanttChartData(state: MillStoreState): GanttChartData {
+  if (
+    cachedGanttResult &&
+    cachedGanttMilestonesRef === state.milestones &&
+    cachedGanttShiftPlanRef === state.shiftPlan
+  ) {
+    return cachedGanttResult
+  }
+
+  const baseTimestamp = resolveBaseShutdownMs(state.milestones)
+  const groups = selectMilestoneGroups(state)
+  const items: GanttActivityItem[] = []
+  let maxEndHour = 72
+
+  for (const group of groups) {
+    const summaryStartHour = Math.max(
+      0,
+      Math.round(((parseTimestampMs(group.summary.start) - baseTimestamp) / (1000 * 3600)) * 10) /
+        10,
+    )
+    const summaryEndHour = Math.max(
+      summaryStartHour + 0.5,
+      Math.round(((parseTimestampMs(group.summary.end) - baseTimestamp) / (1000 * 3600)) * 10) /
+        10,
+    )
+    if (summaryEndHour > maxEndHour) {
+      maxEndHour = summaryEndHour
+    }
+
+    items.push({
+      id: group.summary.id,
+      name: group.summary.name,
+      start: group.summary.start,
+      end: group.summary.end,
+      startHour: summaryStartHour,
+      endHour: summaryEndHour,
+      durationHours: group.summary.durationHours,
+      progress: group.summary.progress,
+      isSummary: true,
+    })
+
+    for (const child of group.children) {
+      const startHour = Math.max(
+        0,
+        Math.round(((parseTimestampMs(child.start) - baseTimestamp) / (1000 * 3600)) * 10) / 10,
+      )
+      const endHour = Math.max(
+        startHour + 0.5,
+        Math.round(((parseTimestampMs(child.end) - baseTimestamp) / (1000 * 3600)) * 10) / 10,
+      )
+      if (endHour > maxEndHour) {
+        maxEndHour = endHour
+      }
+
+      items.push({
+        id: child.id,
+        parentId: child.parentId,
+        name: child.name,
+        start: child.start,
+        end: child.end,
+        startHour,
+        endHour,
+        durationHours: child.durationHours,
+        progress: child.progress,
+        isSummary: false,
+      })
+    }
+  }
+
+  let reportedHours = 28
+  let currentShiftLabel = 'Día 2'
+  for (let i = 0; i < state.shiftPlan.length; i += 1) {
+    if (state.shiftPlan[i].changedCumulative !== undefined) {
+      reportedHours = state.shiftPlan[i].hoursElapsed + 4
+      currentShiftLabel = state.shiftPlan[i + 1]?.shift ?? state.shiftPlan[i].shift
+    }
+  }
+
+  const result: GanttChartData = {
+    baseTimestamp,
+    totalHours: Math.max(72, Math.ceil(maxEndHour)),
+    currentHour: Math.min(maxEndHour, Math.max(1, reportedHours)),
+    currentShiftLabel,
+    items,
+  }
+
+  cachedGanttMilestonesRef = state.milestones
+  cachedGanttShiftPlanRef = state.shiftPlan
+  cachedGanttResult = result
 
   return result
 }
