@@ -4,13 +4,11 @@ import AccessMatrixPage from './pages/AccessMatrixPage.tsx'
 import DashboardPage from './pages/DashboardPage.tsx'
 import LoginPage from './pages/LoginPage.tsx'
 import MappingPage from './pages/MappingPage.tsx'
+import Mill3DPage from './pages/Mill3DPage.tsx'
 import { useMillStore } from './store/useMillStore.ts'
 
 export default function App() {
   const currentUser = useMillStore((s) => s.currentUser)
-  const activeMillCode = useMillStore((s) => s.activeMillCode)
-  const mills = useMillStore((s) => s.mills)
-  const activeMill = mills[activeMillCode]
   const isMinera = currentUser?.role === 'minera'
 
   return (
@@ -23,17 +21,7 @@ export default function App() {
         >
           <Route path="/" element={<DashboardPage />} />
           <Route path="/mapeo" element={<MappingPage />} />
-          <Route
-            path="/vista-3d"
-            element={
-              <div className="rounded-xl border border-slate-200 bg-white p-6 shadow-xs">
-                <h1 className="text-xl font-bold text-slate-900">Vista 3D</h1>
-                <p className="mt-1 text-sm text-slate-500">
-                  Modelo tridimensional interactivo del molino {activeMill?.code ?? activeMillCode}.
-                </p>
-              </div>
-            }
-          />
+          <Route path="/vista-3d" element={<Mill3DPage />} />
           <Route
             path="/plan"
             element={
