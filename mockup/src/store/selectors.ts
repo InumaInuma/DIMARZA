@@ -356,10 +356,7 @@ export function selectPiecesSCurveData(state: MillStoreState): PiecesSCurveData 
     }
   }
 
-  categories.push('Actual')
-  plannedSeries.push(metrics.expectedPieces)
-  changedSeries.push(currentChanged)
-  removedSeries.push(currentRemovedTotal)
+  categories[lastReportedIdx] = `${categories[lastReportedIdx]} · Actual`
 
   const result: PiecesSCurveData = {
     categories,
